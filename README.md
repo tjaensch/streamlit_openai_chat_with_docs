@@ -9,3 +9,5 @@ The user can then ask questions about the content of the data and the applicatio
 
 ### Gotchas
 This is an experimental proof of concept (POC) application and [the results are not guaranteed to be accurate and could be misleading or even wrong](https://becominghuman.ai/why-large-language-models-like-chatgpt-are-bullshit-artists-c4d5bb850852). You can and should never blindly trust the answers given by [Large Language Models (LLMs)](https://en.wikipedia.org/wiki/Large_language_model). Always verify the answers yourself.
+
+![Screenshot](images\screenshot.PNG)
