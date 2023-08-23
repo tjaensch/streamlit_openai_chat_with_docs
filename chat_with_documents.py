@@ -103,7 +103,7 @@ if __name__ == "__main__":
         uploaded_files = st.file_uploader('Upload any file format with text to analyze:', accept_multiple_files=True)
 
         # chunk size number widget
-        chunk_size = st.number_input('Chunk size:', min_value=100, max_value=2048, value=512)
+        chunk_size = st.number_input('Chunk size:', min_value=100, max_value=8192, value=512)
 
         # k number input widget
         k = st.number_input('k', min_value=1, max_value=20, value=3)
