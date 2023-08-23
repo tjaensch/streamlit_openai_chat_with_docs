@@ -29,7 +29,7 @@ def ask_and_get_answer(vector_store, q, k=3):
     from langchain.chains import RetrievalQA
     from langchain.chat_models import ChatOpenAI
 
-    llm = ChatOpenAI(model='gpt-3.5-turbo', temperature=1)
+    llm = ChatOpenAI(model='gpt-4', temperature=1)
     retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': k})
     chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever)
 
@@ -74,7 +74,7 @@ def start_over_with_new_document():
     st.session_state.text_input = ''
     # delete the vector store from the session state
     del st.session_state.vs
-    # Display message to user
+    # display message to user
     st.info('Please upload new documents to continue after clearing or updating the current ones.')
 
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
 
     st.header('LLM Question-Answering Application')
     with st.sidebar:
-        # text_input for the OpenAI API key (alternative to python-dotenv and .env)
+        # text_input for the OpenAI API key
         api_key = st.text_input('Your OpenAI API Key:', type='password')
         if api_key:
             os.environ['OPENAI_API_KEY'] = api_key
