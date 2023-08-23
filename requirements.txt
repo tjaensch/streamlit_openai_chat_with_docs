@@ -3,7 +3,7 @@ langchain
 docx2txt
 pypdf
 streamlit
-chromadb==0.3.29
+chromadb==0.3.29 # version because of Sqlite error on Streamlit Community Sharing
 tiktoken
 unstructured[local-inference]
 layoutparser[layoutmodels,tesseract]
