@@ -157,7 +157,7 @@ if __name__ == "__main__":
                 # deleting the docs folder
                 os.rmdir('./docs/')
 
-    if uploaded_files and 'vs' in st.session_state:
+    if uploaded_files and 'vs' in st.session_state and is_api_key_valid(api_key):
 
         # user's question text input widget
         q = st.text_input('Ask one or more questions about the content of the uploaded data:', key='text_input')
