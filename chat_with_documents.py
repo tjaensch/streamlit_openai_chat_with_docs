@@ -29,7 +29,7 @@ def ask_and_get_answer(vector_store, q, k=3):
     from langchain.chains import RetrievalQA
     from langchain.chat_models import ChatOpenAI
 
-    llm = ChatOpenAI(model='gpt-4', temperature=1)
+    llm = ChatOpenAI(model='gpt-4', temperature=1, max_tokens= None)
     retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': k})
     chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever)
 
@@ -83,10 +83,32 @@ if __name__ == "__main__":
     
     # two images in sidebar next to each other
     col1, col2 = st.sidebar.columns(2)
-    col1.image('images/OpenAI_logo.png')
-    col2.image('images/langchain-chroma-light.png')
+    #col1.image('images/OpenAI_logo.png')
+    #col2.image('images/langchain-chroma-light.png')
 
-    st.header('LLM Question-Answering Application')
+    #st.header('LLM Question-Answering Application')
+    #st.image('directv_hz_rgb_pos.png')
+    st.image('directv_hz_rgb_pos.png', caption=None, width=200, use_column_width=200, clamp=False, channels="RGB", output_format="auto")
+    uploaded_files = st.file_uploader('', accept_multiple_files=True)
+    #add_data = st.button('Upload Transcripts')
+    
+
+    #else:
+
+
+        # add data button widget
+    add_data = None
+        # Upload Button impl
+    if 'button' not in st.session_state:
+        st.session_state.button = False
+
+    def click_button():
+        st.session_state.button = not st.session_state.button
+
+    st.button('Upload Transcripts', on_click=click_button)
+
+    
+
     with st.sidebar:
         # text_input for the OpenAI API key
         api_key = st.text_input('Your OpenAI API Key:', type='password')
@@ -100,7 +122,7 @@ if __name__ == "__main__":
 
 
         # file uploader widget
-        uploaded_files = st.file_uploader('Upload any file format with text to analyze:', accept_multiple_files=True)
+        #uploaded_files = st.file_uploader('Upload any file format with text to analyze:', accept_multiple_files=True)
 
         # chunk size number widget
         chunk_size = st.number_input('Chunk size:', min_value=100, max_value=8192, value=512)
@@ -178,29 +200,7 @@ if __name__ == "__main__":
     else:
         st.info('Please upload one or more files to continue.')
 
-    # insert divider
-    st.markdown('---')
 
-    # insert subtitle
-    st.subheader('How it works')
-    st.markdown('''
-                The application is using [OpenAI's gpt-4 model](https://platform.openai.com/docs/models/gpt-4) to answer questions about the content of one or more files that contain text.
-                Uploaded files are chunked into smaller pieces and each piece is embedded using the [LangChain](https://python.langchain.com/docs/get_started/introduction.html) OpenAIEmbeddings() class.
-                The embeddings are temporarily saved in a [Chroma](https://python.langchain.com/docs/modules/data_connection/vectorstores/integrations/chroma) vector store.
-                The user can then ask questions about the content of the data and the application will return an answer. You will need a valid [OpenAI API key](https://help.openai.com/en/articles/4936850-where-do-i-find-my-secret-api-key) to use this application.
-                Using the OpenAI API is not free and you will be charged for the number of tokens used. The application will show you the number of tokens used and the approximate cost of the embeddings as of August 2023.
-                ''')
-    
-    st.subheader('Gotchas')
-    st.markdown('''
-                This is an experimental proof of concept (POC) application and [the results are not guaranteed to be accurate and could be misleading or even wrong](https://becominghuman.ai/why-large-language-models-like-chatgpt-are-bullshit-artists-c4d5bb850852).
-                You can and should never blindly trust the answers given by [Large Language Models (LLMs)](https://en.wikipedia.org/wiki/Large_language_model). Always verify the answers yourself.
-                ''')
-    
-    st.subheader('Source code')
-    st.markdown('''https://github.com/tjaensch/streamlit_openai_chat_with_docs''')
-                
-            
                 
 
 
