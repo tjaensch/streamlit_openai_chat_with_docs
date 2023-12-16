@@ -1,7 +1,7 @@
-# Streamlit OpenAI Chat With Documents Application
+# DEPRECATED
+##### Doesn't work anymore because of OpenAI API and dependency changes
 
-### Live link on Streamlit Community Cloud
-https://openai-gpt-4-chat-with-docs-demo.streamlit.app/
+# Streamlit OpenAI Chat With Documents Application
 
 ### How it works
 The application is using [OpenAI's gpt-4 model](https://platform.openai.com/docs/models/gpt-4) to answer questions about the content of one or more files that contain text. Uploaded files are chunked into smaller pieces and each piece is embedded using the [LangChain](https://python.langchain.com/docs/get_started/introduction.html) OpenAIEmbeddings() class. The embeddings are temporarily saved in a [Chroma](https://python.langchain.com/docs/modules/data_connection/vectorstores/integrations/chroma) vector store.
