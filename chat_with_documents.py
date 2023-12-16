@@ -94,7 +94,7 @@ if __name__ == "__main__":
             os.environ['OPENAI_API_KEY'] = api_key
 
         # check if the API key is not valid
-        if api_key and not is_api_key_valid(api_key):
+        if api_key: # and not is_api_key_valid(api_key):
             st.error('Invalid OpenAI API key. Please provide a valid key.')
             st.stop()
 
@@ -109,12 +109,12 @@ if __name__ == "__main__":
         k = st.number_input('k', min_value=1, max_value=20, value=3)
 
         # add data button widget
-        add_data = None
+        add_data = st.button('Add Data')
 
-        if is_api_key_valid(api_key):
-            add_data = st.button('Add Data')
-        else:
-            st.info('No OpenAI API key. Please provide a valid key.')
+        # if is_api_key_valid(api_key):
+        #     add_data = st.button('Add Data')
+        # else:
+        #     st.info('No OpenAI API key. Please provide a valid key.')
 
         if uploaded_files and add_data: # if the user uploaded files and clicked the add data button
             check_openai_api_key_exist()
@@ -157,7 +157,7 @@ if __name__ == "__main__":
                 # deleting the docs folder
                 os.rmdir('./docs/')
 
-    if uploaded_files and 'vs' in st.session_state and is_api_key_valid(api_key):
+    if uploaded_files and 'vs' in st.session_state: #and is_api_key_valid(api_key):
 
         # user's question text input widget
         q = st.text_input('Ask one or more questions about the content of the uploaded data:', key='text_input')
