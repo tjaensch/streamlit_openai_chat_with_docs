@@ -94,9 +94,9 @@ if __name__ == "__main__":
             os.environ['OPENAI_API_KEY'] = api_key
 
         # check if the API key is not valid
-        if api_key: # and not is_api_key_valid(api_key):
-            st.error('Invalid OpenAI API key. Please provide a valid key.')
-            st.stop()
+        # if api_key and not is_api_key_valid(api_key):
+        #     st.error('Invalid OpenAI API key. Please provide a valid key.')
+        #     st.stop()
 
 
         # file uploader widget
