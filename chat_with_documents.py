@@ -55,12 +55,8 @@ def is_api_key_valid(api_key):
     import openai
     openai.api_key = api_key
     try:
-        response = openai.Completion.create(
-            engine="davinci",
-            prompt="This is a test.",
-            max_tokens=5
-        )
-    except:
+        openai.Model.list()
+    except openai.error.AuthenticationError as e:
         return False
     else:
         return True
