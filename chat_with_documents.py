@@ -105,10 +105,10 @@ if __name__ == "__main__":
         k = st.number_input('k', min_value=1, max_value=20, value=3)
 
         # add data button widget
-        add_data = st.button('Add Data')
+        add_data = st.button('Add Data', key='add_data')
 
         if is_api_key_valid(api_key):
-            add_data = st.button('Add Data')
+            add_data = st.button('Add Data', key='add_data')
         else:
             st.info('No OpenAI API key. Please provide a valid key.')
 
@@ -168,8 +168,8 @@ if __name__ == "__main__":
 
         # Button for new question, on click clear text input
         if st.session_state.text_input:
-            st.button('New question for same context', on_click=clear_text_input)
-            st.button('New question for new context', on_click=start_over_with_new_document)
+            st.button('New question for same context', on_click=clear_text_input, key='new_question_same_context')
+            st.button('New question for new context', on_click=start_over_with_new_document, key='new_question_new_context')
 
     else:
         st.info('Please upload one or more files to continue.')
