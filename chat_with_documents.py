@@ -90,9 +90,9 @@ if __name__ == "__main__":
             os.environ['OPENAI_API_KEY'] = api_key
 
         # check if the API key is not valid
-        # if api_key and not is_api_key_valid(api_key):
-        #     st.error('Invalid OpenAI API key. Please provide a valid key.')
-        #     st.stop()
+        if api_key and not is_api_key_valid(api_key):
+            st.error('Invalid OpenAI API key. Please provide a valid key.')
+            st.stop()
 
 
         # file uploader widget
@@ -107,10 +107,10 @@ if __name__ == "__main__":
         # add data button widget
         add_data = st.button('Add Data')
 
-        # if is_api_key_valid(api_key):
-        #     add_data = st.button('Add Data')
-        # else:
-        #     st.info('No OpenAI API key. Please provide a valid key.')
+        if is_api_key_valid(api_key):
+            add_data = st.button('Add Data')
+        else:
+            st.info('No OpenAI API key. Please provide a valid key.')
 
         if uploaded_files and add_data: # if the user uploaded files and clicked the add data button
             check_openai_api_key_exist()
