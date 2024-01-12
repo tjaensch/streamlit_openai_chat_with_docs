@@ -105,10 +105,8 @@ if __name__ == "__main__":
         k = st.number_input('k', min_value=1, max_value=20, value=3)
 
         # add data button widget
-        add_data = st.button('Add Data', key='add_data_1')
-
         if is_api_key_valid(api_key):
-            add_data = st.button('Add Data', key='add_data_2')
+            add_data = st.button('Add Data', key='add_data')
         else:
             st.info('No OpenAI API key. Please provide a valid key.')
 
