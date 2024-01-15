@@ -104,6 +104,9 @@ if __name__ == "__main__":
         # k number input widget
         k = st.number_input('k', min_value=1, max_value=20, value=3)
 
+        # initialize add_data
+        add_data = False
+
         # add data button widget
         if is_api_key_valid(api_key):
             add_data = st.button('Add Data', key='add_data')
