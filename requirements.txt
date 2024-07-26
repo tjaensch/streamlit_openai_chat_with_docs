@@ -1,5 +1,6 @@
 openai==0.27.9
 langchain
+langchain-community
 docx2txt
 pypdf
 streamlit
