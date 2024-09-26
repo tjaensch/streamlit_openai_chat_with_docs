@@ -29,7 +29,7 @@ def ask_and_get_answer(vector_store, q, k=3):
     from langchain.chains import RetrievalQA
     from langchain.chat_models import ChatOpenAI
 
-    llm = ChatOpenAI(model='gpt-4', temperature=1)
+    llm = ChatOpenAI(model='gpt-4o-mini', temperature=0)
     retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': k})
     chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever)
 
@@ -40,7 +40,7 @@ def ask_and_get_answer(vector_store, q, k=3):
 # calculate embedding cost using tiktoken
 def calculate_embedding_cost(texts):
     import tiktoken
-    enc = tiktoken.encoding_for_model('text-embedding-ada-002')
+    enc = tiktoken.encoding_for_model('text-embedding-3-small')
     total_tokens = sum([len(enc.encode(page.page_content)) for page in texts])
     return total_tokens, total_tokens / 1000 * 0.0004
 
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     # insert subtitle
     st.subheader('How it works')
     st.markdown('''
-                The application is using [OpenAI's gpt-4 model](https://platform.openai.com/docs/models/gpt-4) to answer questions about the content of one or more files that contain text.
+                The application is using [OpenAI's gpt-4o-mini model](https://openai.com/index/gpt-4o-mini-advancing-cost-efficient-intelligence/) to answer questions about the content of one or more files that contain text.
                 Uploaded files are chunked into smaller pieces and each piece is embedded using the [LangChain](https://python.langchain.com/docs/get_started/introduction.html) OpenAIEmbeddings() class.
                 The embeddings are temporarily saved in a [Chroma](https://python.langchain.com/docs/modules/data_connection/vectorstores/integrations/chroma) vector store.
                 The user can then ask questions about the content of the data and the application will return an answer. You will need a valid [OpenAI API key](https://help.openai.com/en/articles/4936850-where-do-i-find-my-secret-api-key) to use this application.
