@@ -1,0 +1,839 @@
+name: "CSI - Run"
+run-name: "CSI — ${{ inputs.dry_run == true && '🔍 Dry Run' || '🔧 Scan' }}"
+
+# ── Model preference list ──────────────────────────────────────────────
+# Ordered list of models known to reliably invoke the editFiles tool.
+# The workflow tries each in order and uses the first one the CLI accepts.
+# Users can override per-repo via .csi.yml → model or the workflow dispatch input.
+# Update this list when newer tool-capable models become available.
+env:
+  CSI_MODEL_PREFERENCE: "gpt-5.4,claude-sonnet-4,gpt-4o"
+
+on:
+  schedule:
+    # Default: weekly Monday at 10:00 UTC. Override via .csi.yml → schedule
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Scan only — report findings without creating a PR'
+        required: false
+        type: boolean
+        default: false
+      copilot_cli_version:
+        description: 'Copilot CLI release tag to pin (e.g., v1.0.7). Leave empty for latest.'
+        required: false
+        type: string
+        default: ''
+      model:
+        description: 'LLM model ID override (leave empty to use CSI_DEFAULT_MODEL)'
+        required: false
+        type: string
+        default: ''
+      timeout:
+        description: 'Scan timeout in seconds (default: 900 = 15 min)'
+        required: false
+        type: string
+        default: '900'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Scan repository and optionally apply one targeted fix
+  # ─────────────────────────────────────────────────────────────────────────
+  scan-and-fix:
+    name: CSI Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: csi-scan-and-fix
+      cancel-in-progress: true
+
+    steps:
+      # ── Read .csi.yml configuration ──────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read CSI configuration
+        id: config
+        run: |
+          set -euo pipefail
+
+          CONFIG_FILE=".csi.yml"
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "::notice::No .csi.yml found — using defaults."
+            echo "base_branch=main" >> "$GITHUB_OUTPUT"
+            echo "stale_pr_days=3" >> "$GITHUB_OUTPUT"
+            echo "backend=copilot" >> "$GITHUB_OUTPUT"
+            echo "model=" >> "$GITHUB_OUTPUT"
+            echo "timeout=900" >> "$GITHUB_OUTPUT"
+            echo "rulesets=" >> "$GITHUB_OUTPUT"
+            echo "categories=dry_violations,documentation_drift,tooling_currency,dead_code,code_quality,security_hygiene,dependency_health,config_consistency" >> "$GITHUB_OUTPUT"
+            echo "exclude_paths=vendor/**,node_modules/**,dist/**,.git/**" >> "$GITHUB_OUTPUT"
+            echo "custom_rules=" >> "$GITHUB_OUTPUT"
+            echo "has_config=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_config=true" >> "$GITHUB_OUTPUT"
+
+          # Parse config values with yq (pre-installed on ubuntu-latest)
+          # Each field falls back to a sensible default
+          BASE_BRANCH=$(yq -r '.base_branch // "main"' "$CONFIG_FILE")
+          STALE_DAYS=$(yq -r '.stale_pr_days // 3' "$CONFIG_FILE")
+          BACKEND=$(yq -r '.backend // "copilot"' "$CONFIG_FILE")
+          MODEL=$(yq -r '.model // ""' "$CONFIG_FILE")
+          TIMEOUT=$(yq -r '.timeout // 900' "$CONFIG_FILE")
+          RULESETS=$(yq -r '(.rulesets // []) | join(",")' "$CONFIG_FILE")
+
+          # Read enabled categories as a comma-separated list
+          CATEGORIES=""
+          for cat in dry_violations documentation_drift tooling_currency dead_code code_quality security_hygiene dependency_health config_consistency; do
+            ENABLED=$(yq -r ".scan.categories.${cat} // true" "$CONFIG_FILE")
+            if [[ "$ENABLED" == "true" ]]; then
+              CATEGORIES="${CATEGORIES:+${CATEGORIES},}${cat}"
+            fi
+          done
+
+          # Read exclude paths
+          EXCLUDE_PATHS=$(yq -r '(.scan.exclude_paths // []) | join(",")' "$CONFIG_FILE")
+
+          # Read custom rules
+          CUSTOM_RULES=$(yq -r '(.custom_rules // []) | join("|||")' "$CONFIG_FILE")
+
+          # Validate backend
+          if [[ "$BACKEND" != "copilot" && "$BACKEND" != "openai" ]]; then
+            echo "::error::Invalid backend '$BACKEND' in .csi.yml. Must be 'copilot' or 'openai'."
+            exit 1
+          fi
+
+          # Validate timeout
+          if [[ ! "$TIMEOUT" =~ ^[0-9]+$ ]] || (( TIMEOUT <= 0 )); then
+            echo "::error::Invalid timeout '$TIMEOUT' in .csi.yml. Must be a positive integer."
+            exit 1
+          fi
+
+          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "stale_pr_days=$STALE_DAYS" >> "$GITHUB_OUTPUT"
+          echo "backend=$BACKEND" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "timeout=$TIMEOUT" >> "$GITHUB_OUTPUT"
+          echo "rulesets=$RULESETS" >> "$GITHUB_OUTPUT"
+          echo "categories=$CATEGORIES" >> "$GITHUB_OUTPUT"
+          echo "exclude_paths=$EXCLUDE_PATHS" >> "$GITHUB_OUTPUT"
+          echo "custom_rules=$CUSTOM_RULES" >> "$GITHUB_OUTPUT"
+
+      # ── Detect token capabilities ──────────────────────────────────
+      - name: Detect push token
+        id: token
+        run: |
+          if [[ -n "${{ secrets.CSI_PAT }}" ]]; then
+            echo "has_pat=true" >> "$GITHUB_OUTPUT"
+            if [[ "${{ steps.config.outputs.backend }}" != "openai" ]]; then
+              echo "::notice::CSI_PAT detected — workflow file edits enabled."
+            fi
+          else
+            echo "has_pat=false" >> "$GITHUB_OUTPUT"
+            if [[ "${{ steps.config.outputs.backend }}" != "openai" ]]; then
+              echo "::notice::No CSI_PAT — using GITHUB_TOKEN (workflow file edits excluded)."
+            fi
+          fi
+
+      # ── Re-checkout on configured base branch ────────────────────────
+      - name: Checkout base branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.config.outputs.base_branch }}
+          fetch-depth: 0
+          token: ${{ steps.token.outputs.has_pat == 'true' && secrets.CSI_PAT || github.token }}
+          persist-credentials: false
+
+      # ── Set branch name ──────────────────────────────────────────────
+      - name: Set branch name
+        id: branch
+        run: |
+          DATE_STAMP=$(date -u +%Y-%m-%d)
+          BRANCH_NAME="csi/fix-${DATE_STAMP}"
+          echo "name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+          echo "date=$DATE_STAMP" >> "$GITHUB_OUTPUT"
+
+      # ── Idempotency: check for existing PR ───────────────────────────
+      - name: Check for existing branch or PR
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          BACKEND: ${{ steps.config.outputs.backend }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+
+          # OpenAI is scan-only (no PR creation), so never skip
+          if [[ "$BACKEND" == "openai" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OpenAI backend — skipping existing-PR check (scan-only mode)."
+            exit 0
+          fi
+
+          if ! OPEN_PR=$(gh pr list \
+            --head "$BRANCH_NAME" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty'); then
+            echo "::error::Failed to query open PRs. Aborting."
+            exit 1
+          fi
+
+          if [[ -n "$OPEN_PR" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Open PR #${OPEN_PR} already exists from branch '${BRANCH_NAME}'. Skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Clean up orphan branches (push failed before PR creation)
+          if [[ -z "$OPEN_PR" ]]; then
+            BRANCH_PROBE_STDERR="$(mktemp)"
+            if gh api "repos/${{ github.repository }}/git/ref/heads/${BRANCH_NAME}" >/dev/null 2>"$BRANCH_PROBE_STDERR"; then
+              rm -f "$BRANCH_PROBE_STDERR"
+              echo "::notice::Orphan branch '${BRANCH_NAME}' found. Deleting."
+              if ! gh api --method DELETE "repos/${{ github.repository }}/git/refs/heads/${BRANCH_NAME}" >/dev/null; then
+                echo "::error::Failed to delete orphan branch '${BRANCH_NAME}'."
+                exit 1
+              fi
+            else
+              BRANCH_PROBE_ERROR="$(cat "$BRANCH_PROBE_STDERR")"
+              rm -f "$BRANCH_PROBE_STDERR"
+              if ! echo "$BRANCH_PROBE_ERROR" | grep -Eq '404|Not Found'; then
+                echo "::error::Failed to query remote branch '${BRANCH_NAME}'."
+                exit 1
+              fi
+            fi
+          fi
+
+      - name: Exit early if PR exists
+        if: steps.existing.outputs.skip == 'true'
+        run: |
+          echo "::notice::CSI run skipped — open PR already exists for today."
+          exit 0
+
+      # ── Build agent prompt with rulesets ─────────────────────────────
+      - name: Build agent prompt
+        if: steps.existing.outputs.skip != 'true'
+        id: prompt
+        env:
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          CATEGORIES: ${{ steps.config.outputs.categories }}
+          RULESETS: ${{ steps.config.outputs.rulesets }}
+          EXCLUDE_PATHS: ${{ steps.config.outputs.exclude_paths }}
+          CUSTOM_RULES: ${{ steps.config.outputs.custom_rules }}
+        run: |
+          set -euo pipefail
+
+          PROMPT_FILE="${RUNNER_TEMP}/csi-prompt.txt"
+
+          # Mode instruction
+          if [[ "$DRY_RUN" == "true" ]]; then
+            MODE="SCAN ONLY MODE: Do NOT apply any fixes or edit any files. Only scan and report findings."
+          else
+            MODE="SCAN AND FIX MODE: After scanning, select the single highest-priority issue and apply a minimal, targeted fix using editFiles. Touch only the files necessary to resolve that one issue."
+          fi
+
+          cat > "$PROMPT_FILE" << PROMPT_EOF
+          You are the CsiMaintainer agent performing a Continuous Self-Improvement (CSI) scan of this repository.
+
+          ${MODE}
+
+          Follow the CsiMaintainer autonomous scan protocol:
+          1. Read .csi.yml if present for configuration, otherwise use defaults
+          2. Discover the full scope of the repository
+          3. Scan enabled categories: ${CATEGORIES:-all categories enabled}
+          4. Exclude paths matching: ${EXCLUDE_PATHS:-none}
+          5. Rank all findings by severity (HIGH → MEDIUM → LOW)
+          6. $(if [[ "$DRY_RUN" == "true" ]]; then echo "Report all findings without making changes."; else echo "Select the SINGLE highest-priority issue and apply a MINIMAL fix. You MUST use the editFiles tool to make the change — do NOT just describe what should change. Actually edit the file."; fi)
+          7. Generate structured output with 'Applied Fix' and 'Remaining Issues' sections
+
+          $(if [[ "$DRY_RUN" != "true" ]]; then cat << 'TOOL_EOF'
+          IMPORTANT — TOOL USE REQUIRED:
+          You are running in fix mode. After identifying the highest-priority issue, you MUST:
+          1. Use the editFiles tool to modify the file(s) that need fixing
+          2. Make the minimal change necessary to resolve the issue
+          3. Verify the change by re-reading the file
+          Do NOT skip the editFiles step. If you only report the issue without editing, the workflow cannot create a PR and your fix is lost.
+          TOOL_EOF
+          fi)
+
+          CRITICAL RULES:
+          $(if [[ "${{ steps.token.outputs.has_pat }}" != "true" ]]; then echo "- NEVER edit files under .github/workflows/ — the workflow token cannot push workflow file changes. Report workflow issues but fix something else instead."; fi)
+          - NEVER delete files without replacement
+          - NEVER modify secrets, tokens, or authentication steps
+          - NEVER change workflow triggers (on: blocks)
+          - NEVER alter security-sensitive configurations
+          - Keep all changes backward-compatible
+          - Every finding must cite specific file paths and line numbers as evidence
+          - If no issues are found, output a clean scan summary
+          PROMPT_EOF
+
+          # Append rulesets
+          if [[ -n "$RULESETS" ]]; then
+            IFS=',' read -ra RULESET_ARRAY <<< "$RULESETS"
+            for ruleset in "${RULESET_ARRAY[@]}"; do
+              ruleset="$(echo "$ruleset" | xargs)"
+              RULESET_FILE=".github/rulesets/${ruleset}.md"
+              if [[ -f "$RULESET_FILE" ]]; then
+                echo "" >> "$PROMPT_FILE"
+                echo "--- RULESET: ${ruleset} ---" >> "$PROMPT_FILE"
+                cat "$RULESET_FILE" >> "$PROMPT_FILE"
+              else
+                echo "::warning::Ruleset '${ruleset}' not found at ${RULESET_FILE}. Skipping."
+              fi
+            done
+          fi
+
+          # Append custom rules
+          if [[ -n "$CUSTOM_RULES" ]]; then
+            echo "" >> "$PROMPT_FILE"
+            echo "--- CUSTOM RULES ---" >> "$PROMPT_FILE"
+            echo "The following repo-specific rules must also be checked:" >> "$PROMPT_FILE"
+            IFS='|||' read -ra RULES <<< "$CUSTOM_RULES"
+            for rule in "${RULES[@]}"; do
+              rule="$(echo "$rule" | xargs)"
+              [[ -n "$rule" ]] && echo "- $rule" >> "$PROMPT_FILE"
+            done
+          fi
+
+          echo "prompt_file=$PROMPT_FILE" >> "$GITHUB_OUTPUT"
+          echo "Prompt built ($(wc -l < "$PROMPT_FILE") lines)"
+
+      # ── Install Copilot CLI (copilot backend) ────────────────────────
+      - name: Install Copilot CLI
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.config.outputs.backend == 'copilot'
+        id: copilot_cli
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_TOKEN }}
+          COPILOT_CLI_VERSION_INPUT: ${{ inputs.copilot_cli_version }}
+        run: |
+          set -euo pipefail
+          PIN_ARGS=()
+          if [[ -n "${COPILOT_CLI_VERSION_INPUT:-}" ]]; then
+            PIN_ARGS=(--pin "$COPILOT_CLI_VERSION_INPUT")
+          fi
+          bash "${{ github.workspace }}/.github/scripts/install-copilot-cli.sh" "${PIN_ARGS[@]}"
+
+      # ── Setup Python (openai backend) ────────────────────────────────
+      - name: Setup Python for OpenAI backend
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.config.outputs.backend == 'openai'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install OpenAI SDK
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.config.outputs.backend == 'openai'
+        run: pip install 'openai>=1.0.0'
+
+      # ── Create feature branch ────────────────────────────────────────
+      - name: Create feature branch
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+        run: |
+          git checkout -B "$BRANCH_NAME"
+
+      # ── Run scan: Copilot backend ────────────────────────────────────
+      - name: Run CSI scan (Copilot backend)
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.config.outputs.backend == 'copilot'
+        id: scan_copilot
+        env:
+          COPILOT_PAT: ${{ secrets.COPILOT_TOKEN }}
+          COPILOT_TIMEOUT: ${{ steps.config.outputs.timeout }}
+          COPILOT_MODEL_INPUT: ${{ inputs.model || steps.config.outputs.model }}
+          MODEL_PREFERENCE: ${{ env.CSI_MODEL_PREFERENCE }}
+          PROMPT_FILE: ${{ steps.prompt.outputs.prompt_file }}
+        run: |
+          set -euo pipefail
+
+          TIMEOUT="${COPILOT_TIMEOUT:-900}"
+          if [[ ! "$TIMEOUT" =~ ^[0-9]+$ ]] || (( TIMEOUT <= 0 )); then
+            TIMEOUT=900
+          fi
+
+          # Isolated auth
+          GH_CONFIG_DIR="${RUNNER_TEMP}/gh-config-${GITHUB_RUN_ID:-$$}"
+          export GH_CONFIG_DIR
+          mkdir -p "$GH_CONFIG_DIR"
+          chmod 700 "$GH_CONFIG_DIR"
+
+          if [[ -z "${COPILOT_PAT:-}" ]]; then
+            echo "::error::COPILOT_TOKEN secret is empty or not set"
+            exit 1
+          fi
+
+          unset GH_TOKEN GITHUB_TOKEN
+          echo "::add-mask::${COPILOT_PAT}"
+          echo "$COPILOT_PAT" | gh auth login --with-token
+
+          COPILOT_BIN="$HOME/.local/bin/copilot"
+          AGENT_NAME="csi-maintainer"
+          REPORT_FILE="${RUNNER_TEMP}/csi-report-$(date +%Y%m%d-%H%M%S).md"
+          PROMPT="$(cat "$PROMPT_FILE")"
+
+          # Build model list: explicit override first, then preference list
+          MODELS_TO_TRY=()
+          if [[ -n "${COPILOT_MODEL_INPUT:-}" ]] && [[ "$COPILOT_MODEL_INPUT" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            MODELS_TO_TRY+=("$COPILOT_MODEL_INPUT")
+          fi
+          IFS=',' read -ra PREF_MODELS <<< "$MODEL_PREFERENCE"
+          for m in "${PREF_MODELS[@]}"; do
+            m="$(echo "$m" | xargs)"
+            # Don't duplicate the explicit override
+            if [[ "$m" != "${COPILOT_MODEL_INPUT:-}" ]]; then
+              MODELS_TO_TRY+=("$m")
+            fi
+          done
+
+          SCAN_SUCCESS=false
+          USED_MODEL=""
+
+          for MODEL in "${MODELS_TO_TRY[@]}"; do
+            echo "::group::Trying model: $MODEL"
+            > "$REPORT_FILE"  # reset
+
+            EXIT_CODE=0
+            env -i \
+              HOME="$HOME" \
+              PATH="$PATH" \
+              TMPDIR="${TMPDIR:-/tmp}" \
+              GH_CONFIG_DIR="$GH_CONFIG_DIR" \
+              timeout "$TIMEOUT" \
+              "$COPILOT_BIN" --model "$MODEL" -s -p "$PROMPT" \
+              --agent "$AGENT_NAME" \
+              --allow-all-tools \
+              2>"${RUNNER_TEMP}/copilot_stderr.log" \
+              | tee "$REPORT_FILE" || EXIT_CODE=$?
+
+            LINES=$(wc -l < "$REPORT_FILE" 2>/dev/null || echo 0)
+            STDERR_CONTENT=$(cat "${RUNNER_TEMP}/copilot_stderr.log" 2>/dev/null || true)
+            echo "::endgroup::"
+
+            # If model is not available, stderr typically contains "model not found" or similar
+            if [[ $EXIT_CODE -ne 0 ]] && [[ "$LINES" -lt 3 ]] && echo "$STDERR_CONTENT" | grep -qiE 'model.*not|not.*found|unavailable|unsupported|invalid.*model'; then
+              echo "::warning::Model '$MODEL' not available, trying next..."
+              continue
+            fi
+
+            if [[ "$LINES" -gt 0 ]]; then
+              SCAN_SUCCESS=true
+              USED_MODEL="$MODEL"
+              echo "::notice::Scan succeeded with model: $MODEL"
+              break
+            fi
+
+            # Retry without -s if empty output
+            echo "::warning::Empty output with -s flag. Retrying without -s..."
+            > "$REPORT_FILE"
+            env -i \
+              HOME="$HOME" \
+              PATH="$PATH" \
+              TMPDIR="${TMPDIR:-/tmp}" \
+              GH_CONFIG_DIR="$GH_CONFIG_DIR" \
+              timeout "$TIMEOUT" \
+              "$COPILOT_BIN" --model "$MODEL" -p "$PROMPT" \
+              --agent "$AGENT_NAME" \
+              --allow-all-tools \
+              2>"${RUNNER_TEMP}/copilot_stderr.log" | \
+              tee "$REPORT_FILE" || true
+
+            LINES=$(wc -l < "$REPORT_FILE" 2>/dev/null || echo 0)
+            if [[ "$LINES" -gt 0 ]]; then
+              SCAN_SUCCESS=true
+              USED_MODEL="$MODEL"
+              echo "::notice::Scan succeeded with model: $MODEL (no -s)"
+              break
+            fi
+
+            echo "::warning::Model '$MODEL' produced no output, trying next..."
+          done
+
+          if [[ "$SCAN_SUCCESS" != "true" ]]; then
+            echo "::error::All models failed to produce output. Tried: ${MODELS_TO_TRY[*]}"
+            {
+              echo "## CSI Scan Failed"
+              echo ""
+              echo "No model produced usable output."
+              echo "Models tried: ${MODELS_TO_TRY[*]}"
+              echo ""
+              echo "See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+            } > "$REPORT_FILE"
+          fi
+
+          # Strip preamble before first markdown heading
+          if grep -qn '^---$\|^## \|^# ' "$REPORT_FILE"; then
+            FIRST=$(grep -n '^---$\|^## \|^# ' "$REPORT_FILE" | head -1 | cut -d: -f1)
+            if [[ "$FIRST" -gt 1 ]]; then
+              tail -n +"$FIRST" "$REPORT_FILE" > "${REPORT_FILE}.tmp"
+              mv "${REPORT_FILE}.tmp" "$REPORT_FILE"
+            fi
+          fi
+
+          # Strip leading '---'
+          if head -1 "$REPORT_FILE" | grep -q '^---$'; then
+            tail -n +2 "$REPORT_FILE" | sed '/./,$!d' > "${REPORT_FILE}.tmp"
+            mv "${REPORT_FILE}.tmp" "$REPORT_FILE"
+          fi
+
+          REPORT_LINES=$(wc -l < "$REPORT_FILE" 2>/dev/null || echo 0)
+
+          echo "scan_success=$SCAN_SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "report_file=$REPORT_FILE" >> "$GITHUB_OUTPUT"
+
+          rm -rf "${GH_CONFIG_DIR:-}"
+
+      # ── Run scan: OpenAI backend (scan-only) ─────────────────────────
+      - name: Run CSI scan (OpenAI backend)
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.config.outputs.backend == 'openai'
+        id: scan_openai
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_TIMEOUT: ${{ steps.config.outputs.timeout }}
+          OPENAI_MODEL: ${{ inputs.model || steps.config.outputs.model }}
+          PROMPT_FILE: ${{ steps.prompt.outputs.prompt_file }}
+        run: |
+          set -euo pipefail
+
+          echo "::add-mask::${OPENAI_API_KEY}"
+
+          REPORT_FILE="${RUNNER_TEMP}/csi-report-$(date +%Y%m%d-%H%M%S).md"
+
+          python3 "${{ github.workspace }}/.github/scripts/openai-scan.py" \
+            --prompt-file "$PROMPT_FILE" \
+            --output "$REPORT_FILE" \
+            --model "${OPENAI_MODEL:-o3}" \
+            --timeout "${OPENAI_TIMEOUT:-900}" && SCAN_OK=true || {
+              SCAN_OK=false
+              echo "::warning::OpenAI scan exited with error"
+              if [[ ! -s "$REPORT_FILE" ]]; then
+                python3 "${{ github.workspace }}/.github/scripts/openai-scan.py" \
+                  --output "$REPORT_FILE" \
+                  --model "${OPENAI_MODEL:-o3}" \
+              --fallback-report "OpenAI scan process exited with an error before producing a report" || true
+              fi
+            }
+
+          echo "scan_success=$SCAN_OK" >> "$GITHUB_OUTPUT"
+          echo "report_file=$REPORT_FILE" >> "$GITHUB_OUTPUT"
+
+      # ── Resolve scan outputs ─────────────────────────────────────────
+      - name: Resolve scan outputs
+        if: steps.existing.outputs.skip != 'true'
+        id: scan
+        run: |
+          BACKEND="${{ steps.config.outputs.backend }}"
+          echo "::notice::LLM backend: ${BACKEND}"
+          if [[ "$BACKEND" == "copilot" ]]; then
+            echo "scan_success=${{ steps.scan_copilot.outputs.scan_success }}" >> "$GITHUB_OUTPUT"
+            echo "report_file=${{ steps.scan_copilot.outputs.report_file }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "scan_success=${{ steps.scan_openai.outputs.scan_success }}" >> "$GITHUB_OUTPUT"
+            echo "report_file=${{ steps.scan_openai.outputs.report_file }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Check for changes ────────────────────────────────────────────
+      - name: Check for changes
+        if: steps.existing.outputs.skip != 'true'
+        id: changes
+        env:
+          HAS_PAT: ${{ steps.token.outputs.has_pat }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          BACKEND: ${{ steps.config.outputs.backend }}
+        run: |
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$BACKEND" == "openai" ]]; then
+            # OpenAI is scan-only — never produces file changes
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OpenAI scan complete — see report for findings."
+          elif [[ "$HAS_PAT" == "true" ]]; then
+            # PAT can push workflow files — check all changes
+            ALL_CHANGES=$(git status --porcelain || true)
+            if [ -z "$ALL_CHANGES" ]; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::No files were changed. Repository is in good health."
+            else
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # GITHUB_TOKEN — exclude workflow files
+            NON_WF_CHANGES=$(git status --short -- . ':(exclude).github/workflows' ':(exclude).github/workflows/**' || true)
+            if [ -z "$NON_WF_CHANGES" ]; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              if [ -n "$(git status --porcelain)" ]; then
+                echo "::notice::Only workflow files were changed (excluded from commit)."
+              else
+                echo "::notice::No files were changed. Repository is in good health."
+              fi
+            else
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # ── Commit and push ──────────────────────────────────────────────
+      - name: Commit and push changes
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.scan.outputs.scan_success == 'true'
+          && steps.changes.outputs.has_changes == 'true'
+          && inputs.dry_run != true
+        env:
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          PUSH_TOKEN: ${{ steps.token.outputs.has_pat == 'true' && secrets.CSI_PAT || github.token }}
+          HAS_PAT: ${{ steps.token.outputs.has_pat }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [[ "$HAS_PAT" == "true" ]]; then
+            # PAT can push workflow files — stage everything
+            git add -A
+          else
+            # GITHUB_TOKEN — exclude workflow files
+            git add -A -- . ':!.github/workflows' ':!.github/workflows/**'
+            git reset --quiet HEAD -- .github/workflows .github/workflows/** 2>/dev/null || true
+          fi
+
+          if git diff --cached --quiet; then
+            echo "::notice::No committable changes. Skipping commit."
+            exit 0
+          fi
+
+          git commit \
+            -m "chore(csi): automated maintenance fix [$(date -u +%Y-%m-%d)]" \
+            -m "Applied by Continuous Self-Improvement (CSI) workflow." \
+            -m "See PR description for details."
+
+          echo "::add-mask::${PUSH_TOKEN}"
+          AUTH_B64="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 | tr -d '\r\n')"
+          AUTH_HEADER="AUTHORIZATION: basic ${AUTH_B64}"
+          echo "::add-mask::${AUTH_HEADER}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+          GIT_CONFIG_VALUE_0="${AUTH_HEADER}" \
+          git push origin "HEAD:refs/heads/${BRANCH_NAME}"
+
+      # ── Create PR ────────────────────────────────────────────────────
+      - name: Create pull request
+        if: >-
+          steps.existing.outputs.skip != 'true'
+          && steps.scan.outputs.scan_success == 'true'
+          && steps.changes.outputs.has_changes == 'true'
+          && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.has_pat == 'true' && secrets.CSI_PAT || github.token }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          BASE_BRANCH: ${{ steps.config.outputs.base_branch }}
+          REPORT_FILE: ${{ steps.scan.outputs.report_file }}
+          DATE_STAMP: ${{ steps.branch.outputs.date }}
+        run: |
+          set -euo pipefail
+
+          LABEL_ARGS=()
+          if gh label create "csi-maintenance" \
+            --description "Automated maintenance PRs from CSI" \
+            --color "0E8A16" \
+            --force 2>/dev/null; then
+            LABEL_ARGS=(--label "csi-maintenance")
+          elif gh label list --json name --jq '.[].name' 2>/dev/null | grep -qx "csi-maintenance"; then
+            LABEL_ARGS=(--label "csi-maintenance")
+          fi
+
+          PR_TITLE="chore(csi): automated maintenance fix ${DATE_STAMP}"
+          if [[ -f "$REPORT_FILE" ]]; then
+            ISSUE_DESC=$(grep -m1 '^\*\*Description\*\*:' "$REPORT_FILE" | sed 's/^\*\*Description\*\*:[[:space:]]*//' | head -c 72)
+            if [[ -n "$ISSUE_DESC" ]]; then
+              PR_TITLE="chore(csi): ${ISSUE_DESC}"
+            fi
+          fi
+
+          PR_BODY_FILE="${RUNNER_TEMP}/csi-pr-body.md"
+          {
+            echo "## 🔧 Continuous Self-Improvement (CSI)"
+            echo ""
+            echo "**Date:** ${DATE_STAMP}"
+            echo "**Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo ""
+            echo "This PR was automatically generated by the [CSI workflow](${{ github.server_url }}/${{ github.repository }}/actions/workflows/csi-run.yml). It addresses one maintenance issue identified during the repository scan."
+            echo ""
+            echo "> **⏰ Auto-close policy:** This PR will be automatically closed after **${{ steps.config.outputs.stale_pr_days }} days** if not merged."
+            echo ""
+            echo "---"
+          } > "$PR_BODY_FILE"
+
+          if [[ -f "$REPORT_FILE" ]] && [[ -s "$REPORT_FILE" ]]; then
+            SANITIZED_FILE="${RUNNER_TEMP}/csi-report-sanitized.md"
+            bash "${{ github.workspace }}/.github/scripts/sanitize-report.sh" "$REPORT_FILE" "$SANITIZED_FILE"
+            echo "" >> "$PR_BODY_FILE"
+            cat "$SANITIZED_FILE" >> "$PR_BODY_FILE"
+          fi
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH_NAME" \
+            --title "$PR_TITLE" \
+            --body-file "$PR_BODY_FILE" \
+            "${LABEL_ARGS[@]}"
+
+      # ── Dry run output ───────────────────────────────────────────────
+      - name: Output dry run report
+        if: inputs.dry_run == true && steps.scan.outputs.report_file != ''
+        env:
+          REPORT_FILE: ${{ steps.scan.outputs.report_file }}
+        run: |
+          echo "::notice::Dry run — no PR created."
+          if [[ -f "$REPORT_FILE" ]]; then
+            bash "${{ github.workspace }}/.github/scripts/sanitize-report.sh" "$REPORT_FILE"
+          fi
+
+      # ── Job summary ──────────────────────────────────────────────────
+      - name: Render CSI report summary
+        if: always()
+        env:
+          REPORT_FILE: ${{ steps.scan.outputs.report_file }}
+          SCAN_SUCCESS: ${{ steps.scan.outputs.scan_success }}
+          DATE_STAMP: ${{ steps.branch.outputs.date }}
+          HAS_CHANGES: ${{ steps.changes.outputs.has_changes }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          BACKEND: ${{ steps.config.outputs.backend }}
+          SKIPPED: ${{ steps.existing.outputs.skip }}
+        run: |
+          {
+            echo "## 🔍 CSI — Continuous Self-Improvement"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| **Date** | ${DATE_STAMP} |"
+            echo "| **Mode** | $(if [[ \"$DRY_RUN\" == 'true' ]]; then echo '🔍 Dry Run'; elif [[ \"$BACKEND\" == 'openai' ]]; then echo '🔍 Scan Only'; else echo '🔧 Scan & Fix'; fi) |"
+            echo "| **Backend** | \`${BACKEND}\` |"
+            echo "| **Scan Status** | $(if [[ \"$SKIPPED\" == 'true' ]]; then echo '⏭️ Skipped'; elif [[ \"$SCAN_SUCCESS\" == 'true' ]]; then echo '✅ Success'; else echo '❌ Failed'; fi) |"
+            if [[ "$SKIPPED" != 'true' ]]; then
+              echo "| **Changes Found** | $(if [[ \"$HAS_CHANGES\" == 'true' ]]; then echo 'Yes'; else echo 'No'; fi) |"
+            fi
+            echo ""
+
+            if [[ -n "${REPORT_FILE:-}" ]] && [[ -f "$REPORT_FILE" ]] && [[ -s "$REPORT_FILE" ]]; then
+              echo "### Full Report"
+              echo ""
+              echo "<details><summary>Click to expand</summary>"
+              echo ""
+              bash "${{ github.workspace }}/.github/scripts/sanitize-report.sh" "$REPORT_FILE"
+              echo ""
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Upload report artifact ───────────────────────────────────────
+      - name: Upload CSI report
+        if: always() && steps.scan.outputs.report_file != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: csi-report-${{ steps.branch.outputs.date }}
+          path: ${{ steps.scan.outputs.report_file }}
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Close stale CSI PRs
+  # ─────────────────────────────────────────────────────────────────────────
+  cleanup-stale-prs:
+    name: Cleanup Stale PRs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: csi-cleanup
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout for config
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: .csi.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Read stale days config
+        id: config
+        run: |
+          if [[ -f ".csi.yml" ]]; then
+            STALE_DAYS=$(yq -r '.stale_pr_days // 3' .csi.yml)
+          else
+            STALE_DAYS=3
+          fi
+          echo "stale_days=$STALE_DAYS" >> "$GITHUB_OUTPUT"
+
+      - name: Close stale CSI PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE_DAYS: ${{ steps.config.outputs.stale_days }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+
+          if ! OPEN_PRS=$(gh pr list \
+            -R "${{ github.repository }}" \
+            --state open \
+            --json number,createdAt,headRefName,title \
+            --jq '[.[] | select(.headRefName | startswith("csi/fix-"))] | .[] | @base64'); then
+            echo "::error::Failed to list open PRs. Aborting."
+            exit 1
+          fi
+
+          if [[ -z "$OPEN_PRS" ]]; then
+            echo "✓ No open CSI PRs found."
+            exit 0
+          fi
+
+          CUTOFF_EPOCH=$(date -d "-${STALE_DAYS} days" +%s 2>/dev/null || date -v-${STALE_DAYS}d +%s)
+          CLOSED_COUNT=0
+
+          while IFS= read -r ENCODED_PR; do
+            [[ -z "$ENCODED_PR" ]] && continue
+
+            PR_JSON=$(echo "$ENCODED_PR" | base64 -d 2>/dev/null || echo "$ENCODED_PR" | base64 -D 2>/dev/null || echo '{}')
+            PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+            PR_CREATED=$(echo "$PR_JSON" | jq -r '.createdAt')
+            PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
+
+            PR_EPOCH=$(date -d "$PR_CREATED" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
+
+            if [[ -z "$PR_EPOCH" || "$PR_EPOCH" == "0" ]]; then
+              echo "::warning::Skipping PR #${PR_NUMBER} — could not parse date."
+              continue
+            fi
+
+            if [[ "$PR_EPOCH" -lt "$CUTOFF_EPOCH" ]]; then
+              echo "Closing stale PR #${PR_NUMBER}: ${PR_TITLE}"
+              if gh pr close "$PR_NUMBER" \
+                -R "${{ github.repository }}" \
+                --comment "🤖 **Auto-closed by CSI.** This PR was not merged within ${STALE_DAYS} days. The fix will be re-evaluated in a future scan." \
+                --delete-branch; then
+                CLOSED_COUNT=$((CLOSED_COUNT + 1))
+              fi
+            fi
+          done <<< "$OPEN_PRS"
+
+          echo "✓ Closed ${CLOSED_COUNT} stale PR(s)."

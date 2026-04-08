@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .csi.yml — Continuous Self-Improvement configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Documentation: https://github.com/tjaensch/csi#configuration
+# ─────────────────────────────────────────────────────────────────────────────
+version: 1
+
+schedule: "0 10 * * 1"
+base_branch: main
+stale_pr_days: 3
+
+backend: copilot
+model: ""
+timeout: 900
+
+scan:
+  categories:
+    dry_violations: true
+    documentation_drift: true
+    tooling_currency: true
+    dead_code: true
+    code_quality: true
+    security_hygiene: true
+    dependency_health: true
+    config_consistency: true
+  exclude_paths:
+    - "vendor/**"
+    - "node_modules/**"
+    - "dist/**"
+    - ".git/**"
+
+rulesets: 
+  - python
+
+custom_rules: []
