@@ -1,0 +1,93 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .csi.yml — Continuous Self-Improvement configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Place this file in the root of your repository to configure CSI behavior.
+# All fields have sensible defaults — only override what you need.
+#
+# Documentation: https://github.com/tjaensch/csi#configuration
+# ─────────────────────────────────────────────────────────────────────────────
+version: 1
+
+# ── Schedule ──────────────────────────────────────────────────────────────
+# Cron expression for automated scans (UTC). Default: weekly Monday 10:00 UTC.
+# This value is written into .github/workflows/csi-run.yml during install.
+# To change it later, re-run install.sh with --schedule and --force, or edit
+# .github/workflows/csi-run.yml cron directly.
+schedule: "0 10 * * 1"
+
+# ── Branch settings ───────────────────────────────────────────────────────
+# Branch to base CSI fix branches on, and the PR target.
+base_branch: main
+
+# How many days before an unmerged CSI PR is automatically closed.
+stale_pr_days: 3
+
+# Override the LLM model. Leave empty to auto-select from the workflow's
+# preference list (tries models in order until one works).
+# Examples: "gpt-4o", "claude-sonnet-4", "gpt-5.4"
+# model: "gpt-5.4"
+
+# Maximum time in seconds for the scan (default: 1800 = 30 min).
+timeout: 1800
+
+# ── Scan categories ──────────────────────────────────────────────────────
+# Toggle individual scan categories on or off.
+scan:
+  categories:
+    dry_violations: true
+    documentation_drift: true
+    tooling_currency: true
+    dead_code: true
+    code_quality: true
+    security_hygiene: true
+    dependency_health: true
+    config_consistency: true
+
+  # Glob patterns for paths to exclude from scanning.
+  exclude_paths:
+    - "vendor/**"
+    - "node_modules/**"
+    - "dist/**"
+    - ".git/**"
+
+# ── Rulesets ─────────────────────────────────────────────────────────────
+# Which language-aware rule packs to apply alongside the always-included
+# "generic" ruleset. Available: bash, docker, dotnet, go, java, javascript,
+# kotlin, kubernetes, nextflow, php, powershell, python, ruby, rust, sql,
+# swift, terraform, typescript
+rulesets:
+  - python
+  # - bash
+  # - docker
+  # - dotnet
+  # - go
+  # - java
+  # - javascript
+  # - kotlin
+  # - kubernetes
+  # - nextflow
+  # - php
+  # - powershell
+  # - python
+  # - ruby
+  # - rust
+  # - sql
+  # - swift
+  # - terraform
+  # - typescript
+
+# ── Custom rules ─────────────────────────────────────────────────────────
+# Add repo-specific rules that the agent should check for.
+# Each entry is a free-text instruction the agent will incorporate.
+custom_rules: []
+  # - "All Python files must use type hints for function signatures"
+  # - "Every module must have a README.md"
+  # - "Docker images must not use the :latest tag"
+
+# ── Ignored issues ───────────────────────────────────────────────────────
+# Suppress specific findings that have been reviewed and intentionally declined.
+# Each entry is a substring matched case-insensitively against issue descriptions.
+# Matching issues will not appear in "Applied Fix" or "Remaining Issues".
+ignore_issues:
+  - "empty rulesets"
+  - "stale rulesets when no valid"
